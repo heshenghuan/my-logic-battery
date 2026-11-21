@@ -238,7 +238,7 @@ class BluetoothBatterySource:
 
                     name = self._friendly_name(devices._handle, info)
                     match_address = bool(self.address) and self.address in instance_id.upper()
-                    match_name = bool(name) and _name_score(self.friendly_name, name) > 0
+                    match_name = (not self.address) and bool(name) and _name_score(self.friendly_name, name) > 0
                     if not (match_address or match_name):
                         continue
 
