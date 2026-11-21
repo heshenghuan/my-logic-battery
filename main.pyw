@@ -17,7 +17,14 @@ from functools import lru_cache
 import pystray
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
-from battery import BatteryReading, read_battery
+from battery import (
+    BatteryReading,
+    READERS,
+    candidates,
+    find_device,
+    read_battery,
+    scan,
+)
 
 try:
     from pystray._util import win32 as _win32
@@ -49,9 +56,11 @@ SHORTCUT_PATH = os.path.join(
 )
 
 DEFAULT_CONFIG = {
-    # 蓝牙 BLE 地址，形如 ECF2A3FCBAB3；留空则按 device_name 匹配
-    "device_address": "",
-    "device_name": "MX Anywhere 2",
+    # 先轮询 2.4G 组，全部没命中再轮询蓝牙组；两组都为空时启动会自动发现
+    "devices": {
+        "2.4g": [],
+        "bluetooth": [],
+    },
     "threshold": 20,
     "interval_minutes": 5,
     "icon_style": "both",
@@ -76,12 +85,71 @@ _battery_solo_font = ImageFont.truetype(ICON_FONT_PATH, 76)
 _mouse_font = ImageFont.truetype(ICON_FONT_PATH, 22)
 
 
+def _normalize_devices(stored: dict) -> dict:
+    raw = stored.get("devices")
+    groups: dict[str, list] = {"2.4g": [], "bluetooth": []}
+
+    if isinstance(raw, dict):
+        for key in groups:
+            if isinstance(raw.get(key), list):
+                groups[key] = raw[key]
+    elif isinstance(raw, list):
+        # 上一版是带 connection 的单列表
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            connection = str(item.get("connection") or "").strip().lower()
+            if connection not in groups:
+                connection = "2.4g" if item.get("unit_id") else "bluetooth"
+            groups[connection].append(item)
+    else:
+        # 更早的扁平结构
+        legacy_name = str(stored.get("device_name") or "").strip()
+        legacy_address = str(stored.get("device_address") or "").strip()
+        if legacy_name or legacy_address:
+            groups["bluetooth"].append({
+                "name": legacy_name,
+                "display_name": "",
+                "address": legacy_address,
+                "unit_id": "",
+            })
+
+    normalized = {}
+    for key, items in groups.items():
+        cleaned = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            entry = {
+                "name": str(item.get("name") or "").strip(),
+                "display_name": str(
+                    item.get("display_name") or item.get("alias") or ""
+                ).strip(),
+                "address": str(item.get("address") or "").strip().upper(),
+                "unit_id": str(item.get("unit_id") or "").strip().upper(),
+            }
+            if entry["name"] or entry["address"] or entry["unit_id"]:
+                cleaned.append(entry)
+        normalized[key] = cleaned
+    return normalized
+
+
 def load_config() -> dict:
-    config = dict(DEFAULT_CONFIG)
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as fp:
-            config.update(json.load(fp))
+            stored = json.load(fp)
     except (OSError, ValueError):
+        stored = {}
+    if not isinstance(stored, dict):
+        stored = {}
+
+    config = dict(DEFAULT_CONFIG)
+    config.update(stored)
+    config["devices"] = _normalize_devices(stored)
+    for legacy in ("device_name", "device_address", "alias"):
+        config.pop(legacy, None)
+
+    if config != stored:
         save_config(config)
     return config
 
@@ -92,6 +160,13 @@ def save_config(config: dict) -> None:
             json.dump(config, fp, ensure_ascii=False, indent=2)
     except OSError:
         pass
+
+
+def _config_mtime() -> float:
+    try:
+        return os.path.getmtime(CONFIG_PATH)
+    except OSError:
+        return 0.0
 
 
 def _glyph_layer(text: str, font: ImageFont.FreeTypeFont, color) -> Image.Image:
@@ -196,11 +271,16 @@ def remove_autostart_shortcut() -> bool:
 class Monitor:
     def __init__(self) -> None:
         self.config = load_config()
+        self._config_mtime = _config_mtime()
         self.level: int | None = None
         self.source = ""
         self.detail = ""
+        self.device_name = ""
         self.updated: datetime | None = None
         self.alerted = False
+        self.active: tuple[str, dict] | None = None
+        self.discovered: list[dict] = []
+        self.scanning = False
         self.icon: pystray.Icon | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -219,6 +299,8 @@ class Monitor:
 
     def _on_setup(self, icon: pystray.Icon) -> None:
         icon.visible = True
+        # 先扫一次，打开「发现设备」时就能看到候选
+        self._start_scan()
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
 
@@ -228,16 +310,47 @@ class Monitor:
             self._stop.wait(max(1, self.config["interval_minutes"]) * 60)
 
     def _refresh(self) -> None:
-        reading = read_battery(
-            self.config["device_address"], self.config["device_name"]
-        )
+        self._reload_config_if_changed()
+
+        if not self._has_devices():
+            self.active = None
+            self._apply(BatteryReading(None, "", "", "未绑定设备"))
+            return
+
+        # 已经锁定设备时只查它；读不到就认为掉线，重新找一遍
+        if self.active is not None:
+            key, device = self.active
+            reading = READERS[key](device)
+            if reading.ok:
+                self._apply(reading)
+                self._notify_if_needed(reading)
+                return
+            self.active = None
+
+        self.active, reading = find_device(self.config["devices"])
         self._apply(reading)
         self._notify_if_needed(reading)
+
+    def _has_devices(self) -> bool:
+        devices = self.config["devices"]
+        return bool(devices.get("2.4g") or devices.get("bluetooth"))
+
+    def _reload_config_if_changed(self) -> None:
+        """配置文件被手动改过时重新加载，无需重启程序。"""
+        mtime = _config_mtime()
+        if mtime == self._config_mtime:
+            return
+        self._config_mtime = mtime
+        self.config = load_config()
+        self._config_mtime = _config_mtime()
+        # 设备条目可能被改过，之前的锁定作废，按新配置重新找
+        self.active = None
 
     def _apply(self, reading: BatteryReading) -> None:
         self.level = reading.level
         self.source = reading.source
         self.detail = reading.detail
+        self.device_name = reading.device_name
         self.updated = datetime.now()
 
         if self.icon is not None:
@@ -248,7 +361,9 @@ class Monitor:
             self.icon.update_menu()
 
     def _status_text(self) -> str:
-        name = self.config["device_name"]
+        if not self._has_devices():
+            return "未绑定设备 · 菜单「发现设备」"
+        name = self.device_name or "鼠标"
         if self.level is not None:
             return f"{name} · {self.level}% · {self.source}"
         if self.updated is None:
@@ -264,7 +379,7 @@ class Monitor:
             self._notify(
                 f"当前电量 {reading.level}%，已低于设定的 {threshold}%。\n"
                 f"连接方式：{reading.source}，请及时充电。",
-                f"{self.config['device_name']} 电量偏低",
+                f"{self.device_name or APP_NAME} 电量偏低",
             )
         elif reading.level > threshold + 5:
             self.alerted = False
@@ -307,6 +422,10 @@ class Monitor:
             pystray.MenuItem(
                 "立即刷新", self._on_refresh, default=_MenuOnClickIcon is None
             ),
+            pystray.MenuItem(
+                lambda item: "发现设备（扫描中…）" if self.scanning else "发现设备",
+                pystray.Menu(lambda: self._discovery_items()),
+            ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("电量低于", threshold_menu),
             pystray.MenuItem("图标样式", style_menu),
@@ -315,6 +434,7 @@ class Monitor:
                 self._on_toggle_autostart,
                 checked=lambda item: os.path.exists(SHORTCUT_PATH),
             ),
+            pystray.MenuItem("重启程序", self._on_restart),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出", self._on_quit),
         )
@@ -354,6 +474,130 @@ class Monitor:
     def _on_refresh(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
         threading.Thread(target=self._refresh, daemon=True).start()
 
+    # --- 设备发现与绑定 ---
+
+    def _discovery_items(self):
+        yield pystray.MenuItem("重新扫描", self._on_scan)
+        if self.scanning:
+            yield pystray.MenuItem("扫描中…", None, enabled=False)
+            return
+        if not self.discovered:
+            yield pystray.MenuItem("未发现可用设备", None, enabled=False)
+            return
+        rows = self._unbound_rows()
+        if not rows:
+            yield pystray.MenuItem("设备均已绑定", None, enabled=False)
+            return
+        yield pystray.Menu.SEPARATOR
+        for row in rows:
+            yield pystray.MenuItem(
+                self._row_label(row), self._make_bind(row)
+            )
+
+    def _unbound_rows(self) -> list[dict]:
+        """过滤掉已经写进配置的设备。"""
+        bound: set[tuple[str, str]] = set()
+        for group in self.config["devices"].values():
+            for device in group:
+                if device.get("address"):
+                    bound.add(("bluetooth", device["address"]))
+                if device.get("unit_id"):
+                    bound.add(("2.4g", device["unit_id"]))
+
+        rows = []
+        for row in self.discovered:
+            if row["connection"] == "bluetooth":
+                marker = ("bluetooth", (row.get("address") or "").upper())
+            else:
+                marker = ("2.4g", (row.get("unit_id") or "").upper())
+            if marker in bound:
+                continue
+            rows.append(row)
+        return rows
+
+    def _row_label(self, row: dict) -> str:
+        name = row.get("name") or "未知设备"
+        for prefix in ("Wireless Mobile Mouse ", "Logitech "):
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+        if len(name) > 34:
+            name = name[:33] + "…"
+        channel = "2.4G" if row["connection"] == "2.4g" else "蓝牙"
+        level = row.get("level")
+        suffix = f" · {level}%" if level is not None else ""
+        return f"{name} · {channel}{suffix}"
+
+    def _make_bind(self, row: dict):
+        def action(icon: pystray.Icon, item: pystray.MenuItem) -> None:
+            threading.Thread(target=self._bind, args=(row,), daemon=True).start()
+
+        return action
+
+    def _on_scan(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        self._start_scan(notify=True)
+
+    def _start_scan(self, notify: bool = False) -> None:
+        if self.scanning:
+            return
+        self.scanning = True
+        if self.icon is not None:
+            self.icon.update_menu()
+        threading.Thread(
+            target=self._scan_worker, args=(notify,), daemon=True
+        ).start()
+
+    def _scan_worker(self, notify: bool) -> None:
+        try:
+            rows = candidates()
+        except Exception:
+            rows = []
+        self.discovered = rows
+        self.scanning = False
+        if self.icon is not None:
+            self.icon.update_menu()
+        if notify:
+            if rows:
+                self._notify(
+                    f"发现 {len(rows)} 个设备，请重新打开菜单选择。", "扫描完成"
+                )
+            else:
+                self._notify(
+                    "没有发现可用设备，请确认鼠标已开机并连接。", "未发现设备"
+                )
+
+    def _bind(self, row: dict) -> None:
+        key = row["connection"]
+        entry = {
+            "name": row.get("name") or "",
+            "display_name": "",
+            "address": (row.get("address") or "").upper() if key == "bluetooth" else "",
+            "unit_id": (row.get("unit_id") or "").upper() if key == "2.4g" else "",
+        }
+        marker = entry["address"] or entry["unit_id"]
+        if not marker and not entry["name"]:
+            return
+
+        group = self.config["devices"][key]
+        exists = False
+        for existing in group:
+            if entry["address"] and existing.get("address") == entry["address"]:
+                exists = True
+                break
+            if entry["unit_id"] and existing.get("unit_id") == entry["unit_id"]:
+                exists = True
+                break
+            if not marker and entry["name"] and existing.get("name") == entry["name"]:
+                exists = True
+                break
+        if not exists:
+            group.append(entry)
+            save_config(self.config)
+
+        self.active = (key, entry)
+        self._refresh()
+        if self.icon is not None:
+            self.icon.update_menu()
+
     def _on_toggle_autostart(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
         if os.path.exists(SHORTCUT_PATH):
             ok = remove_autostart_shortcut()
@@ -366,18 +610,39 @@ class Monitor:
         self._notify(message, APP_NAME)
         icon.update_menu()
 
+    def _on_restart(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        try:
+            subprocess.Popen(
+                [sys.executable, os.path.join(BASE_DIR, "main.pyw")],
+                cwd=BASE_DIR,
+                close_fds=True,
+                creationflags=subprocess.DETACHED_PROCESS
+                | subprocess.CREATE_NEW_PROCESS_GROUP,
+            )
+        except OSError:
+            self._notify("重启失败，请手动启动程序。", "重启失败")
+            return
+        self._on_quit(icon, item)
+
     def _on_quit(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
         self._stop.set()
         icon.stop()
 
 
 def main() -> None:
+    if "--scan" in sys.argv:
+        for row in scan():
+            if row["connection"] == "bluetooth":
+                state = f'电量 {row["level"]}%' if row["online"] else "已断开"
+                print(f'蓝牙  地址={row["address"] or "-"}  名称={row["name"]}  {state}')
+            else:
+                print(f'2.4G  单元ID={row["unit_id"] or "-"}  名称={row["name"]}  '
+                      f'电量 {row["level"]}%')
+        return
+
     monitor = Monitor()
     if "--once" in sys.argv:
-        reading = read_battery(
-            monitor.config["device_address"], monitor.config["device_name"]
-        )
-        print(reading)
+        print(read_battery(monitor.config["devices"]))
         return
     monitor.run()
 
