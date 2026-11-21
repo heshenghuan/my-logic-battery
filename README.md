@@ -86,7 +86,7 @@ python -m venv .venv
         "name": "Wireless Mobile Mouse MX Anywhere 2S",
         "display_name": "",
         "address": "",
-        "unit_id": "040FE8FB"
+        "unit_id": "DEADBEEF"
       }
     ],
     "bluetooth": []
@@ -114,8 +114,8 @@ python -m venv .venv
 ```
 
 ```
-蓝牙  地址=ECF2A3FCBAB3  名称=MX Anywhere 2  已断开
-2.4G  单元ID=040FE8FB  名称=Wireless Mobile Mouse MX Anywhere 2S  电量 50%
+蓝牙  地址=AABBCCDDEEFF  名称=MX Anywhere 2  已断开
+2.4G  单元ID=DEADBEEF  名称=Wireless Mobile Mouse MX Anywhere 2S  电量 50%
 ```
 
 新加一只鼠标时，把它接到电脑上跑一次 `--scan`，把对应行抄进 `2.4g` 或 `bluetooth` 列表即可。
@@ -149,7 +149,7 @@ python -m venv .venv
 
 ## 配置文件
 
-`config.json` 首次运行时自动生成，修改后需重启程序生效（菜单里的阈值和图标样式会直接写回该文件）。
+`config.json` 首次运行时自动生成，修改后自动热加载，下一次轮询或点「立即刷新」即生效（菜单里的阈值和图标样式会直接写回该文件）。
 
 | 字段 | 说明 |
 | --- | --- |

@@ -100,7 +100,13 @@ def _normalize_devices(stored: dict) -> dict:
                 continue
             connection = str(item.get("connection") or "").strip().lower()
             if connection not in groups:
-                connection = "2.4g" if item.get("unit_id") else "bluetooth"
+                if str(item.get("unit_id") or "").strip():
+                    connection = "2.4g"
+                elif str(item.get("address") or "").strip():
+                    connection = "bluetooth"
+                else:
+                    # 两种稳定标识都没有，无法判断连接方式，跳过
+                    continue
             groups[connection].append(item)
     else:
         # 更早的扁平结构
@@ -593,7 +599,21 @@ class Monitor:
             group.append(entry)
             save_config(self.config)
 
-        self.active = (key, entry)
+        # 保存后重新加载，用规范化后的条目锁定设备，避免与配置文件不一致
+        self.config = load_config()
+        self._config_mtime = _config_mtime()
+        active = None
+        for stored in self.config["devices"][key]:
+            if entry["address"] and stored.get("address") == entry["address"]:
+                active = stored
+                break
+            if entry["unit_id"] and stored.get("unit_id") == entry["unit_id"]:
+                active = stored
+                break
+            if not marker and entry["name"] and stored.get("name") == entry["name"]:
+                active = stored
+                break
+        self.active = (key, active or entry)
         self._refresh()
         if self.icon is not None:
             self.icon.update_menu()

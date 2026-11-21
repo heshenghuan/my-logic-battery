@@ -21,6 +21,7 @@ setupapi = ctypes.WinDLL("setupapi", use_last_error=True)
 cfgmgr32 = ctypes.WinDLL("cfgmgr32")
 
 DIGCF_PRESENT = 0x02
+ERROR_INSUFFICIENT_BUFFER = 122
 DEVPROP_TYPE_BYTE = 0x03
 DEVPROP_TYPE_UINT32 = 0x07
 DEVPROP_TYPE_STRING = 0x12
@@ -165,6 +166,15 @@ def _get_property(handle, info, key: tuple[uuid.UUID, int]):
         ctypes.byref(prop_type), buf, ctypes.sizeof(buf),
         ctypes.byref(needed), 0,
     )
+    if not ok and ctypes.get_last_error() == ERROR_INSUFFICIENT_BUFFER \
+            and needed.value > ctypes.sizeof(buf):
+        # 属性值超过固定缓冲时按所需大小扩容重试一次
+        buf = (ctypes.c_ubyte * needed.value)()
+        ok = setupapi.SetupDiGetDevicePropertyW(
+            handle, ctypes.byref(info), ctypes.byref(prop_key),
+            ctypes.byref(prop_type), buf, ctypes.sizeof(buf),
+            ctypes.byref(needed), 0,
+        )
     if not ok:
         return None, None
     return prop_type.value, bytes(buf[: needed.value])
