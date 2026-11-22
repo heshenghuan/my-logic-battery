@@ -91,6 +91,21 @@ def _build_devices(config: dict) -> list[MouseDevice]:
     return devices
 
 
+_LEGACY_CONFIG_KEYS = ("device_name", "device_address", "alias")
+
+
+def _is_legacy_config(stored: dict) -> bool:
+    devices = stored.get("devices")
+    if isinstance(devices, dict):
+        return True
+    if isinstance(devices, list):
+        return any(
+            isinstance(item, dict) and ("protocol" in item or "connection" in item)
+            for item in devices
+        )
+    return any(key in stored for key in _LEGACY_CONFIG_KEYS)
+
+
 def load_config() -> dict:
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as fp:
@@ -99,6 +114,14 @@ def load_config() -> dict:
         stored = {}
     if not isinstance(stored, dict):
         stored = {}
+
+    if _is_legacy_config(stored):
+        print(
+            "[LogicBattery] 检测到旧版 config.json（分组 / protocol / connection / "
+            "device_name 等格式），当前版本不再自动迁移，已按空设备列表处理。\n"
+            "  如需保留设备，请删除 config.json 后重新从托盘菜单「发现设备」绑定。",
+            file=sys.stderr,
+        )
 
     config = dict(DEFAULT_CONFIG)
     config.update(stored)
@@ -554,7 +577,8 @@ class Monitor:
 
 def main() -> None:
     if "--scan" in sys.argv:
-        for row in scan_all():
+        rows = list(scan_all())
+        for row in rows:
             device = row.device
             if device.type == "bluetooth":
                 if not row.online:
@@ -567,6 +591,8 @@ def main() -> None:
             else:
                 print(f"{device.channel_label}  单元ID={device.stable_id or '-'}  "
                       f"名称={device.name}  电量 {row.level}%")
+        if rows:
+            print("以上标识为真实设备信息，请勿公开发布。")
         return
 
     monitor = Monitor()

@@ -117,8 +117,18 @@ def _name_score(expected: str, actual: str) -> int:
     return 0
 
 
+def _device_classes() -> dict[str, type]:
+    """延迟导入设备注册表。
+
+    devices 包反向依赖本模块的 MouseDevice 等，顶层导入会形成环
+    （import devices 失败）；改为函数内导入，两种入口顺序都能正常加载。
+    """
+    from devices import DEVICE_CLASSES
+    return DEVICE_CLASSES
+
+
 def device_from_json(data: dict) -> MouseDevice:
-    cls = DEVICE_CLASSES.get(str(data.get("type") or ""))
+    cls = _device_classes().get(str(data.get("type") or ""))
     if cls is None:
         raise ValueError(f"未知设备类型: {data.get('type')!r}")
     return cls.from_json(data)
@@ -127,7 +137,7 @@ def device_from_json(data: dict) -> MouseDevice:
 def scan_all(only_bindable: bool = False) -> list[Candidate]:
     """按注册表顺序扫描；2.4G 两个类在前，蓝牙在后。"""
     found: list[Candidate] = []
-    for cls in DEVICE_CLASSES.values():
+    for cls in _device_classes().values():
         try:
             found.extend(
                 item for item in cls.scan()
@@ -149,6 +159,4 @@ def read_any(devices: list[MouseDevice]) -> tuple[MouseDevice | None, BatteryRea
     return None, last
 
 
-# 设备注册表放在文件末尾导入：devices 包反向依赖本模块的 MouseDevice 等，
-# 必须等本模块的基类定义完成后再加载，避免循环导入。
-from devices import DEVICE_CLASSES  # noqa: E402  (放在基类定义之后)
+# 设备注册表通过 _device_classes() 延迟导入，见上方定义。

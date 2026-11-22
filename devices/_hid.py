@@ -41,7 +41,7 @@ class _HidMouseDevice(MouseDevice):
         try:
             found = self._query(device, meta)
             if found is None:
-                # 设备休眠时可能漏掉第一包，清空缓冲后重试一次
+                # 设备休眠时可能漏掉第一包，重试一次（清缓冲由各子类 _query 负责）
                 found = self._query(device, meta)
         finally:
             device.close()
