@@ -1,5 +1,28 @@
 # 程序更新日志
 
+## 2026-11-22
+
+### 新增
+
+- **支持 Mloong MX301 PRO（2.4G）**：逆向官方 Web HUB 的厂商 64 字节报文读取电量，稳定标识用接收器序列号，配置类型为 `mloong_2.4g`。
+
+### 变更
+
+- **设备抽象**：引入 `MouseDevice` 基类与 `devices/` 包，蓝牙 / 罗技 / Mloong 各自实现读取逻辑；新增设备只需加模块并在 `DEVICE_CLASSES` 注册，`main.pyw` 不再感知具体协议。
+- **配置结构**：`devices` 改为扁平列表，每项用 `type` 指定设备类；列表顺序即轮询优先级，2.4G 建议排在蓝牙前面。
+- **不再兼容旧版配置**：旧的分组（`2.4g` / `bluetooth`）、`protocol`、`connection`、`device_name` 等格式不再自动迁移，启动时按空设备列表处理并打印提示；删除 `config.json` 后重新从「发现设备」绑定即可。
+- **循环导入修复**：`battery` 改为延迟导入 `devices` 注册表，`import devices` 不再失败。
+
+### 涉及文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `battery.py` | 仅保留基类与公共入口，注册表延迟导入 |
+| `devices/` | 新增设备实现包（bluetooth / logitech / mloong + `_hid` 模板基类） |
+| `winapi.py` | 从 `battery.py` 拆出的 Windows SetupAPI / CFGMGR32 封装 |
+| `main.pyw` | 协议无关轮询、旧配置检测提示、`--scan` 隐私提示 |
+| `README.md` | Mloong 协议细节、扁平配置说明、文件结构 |
+
 ## 2026-11-21
 
 ### 新增
