@@ -1,8 +1,4 @@
-"""罗技 MX Anywhere 2 电量托盘监控。
-
-双击运行（.pyw 用 pythonw 启动，不会留下控制台窗口）。
-电量低于设定阈值时通过系统通知提醒，托盘图标颜色随电量变化。
-"""
+"""鼠标电量托盘监控。"""
 
 from __future__ import annotations
 
@@ -19,11 +15,11 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 from battery import (
     BatteryReading,
-    READERS,
-    candidates,
-    find_device,
-    read_battery,
-    scan,
+    Candidate,
+    MouseDevice,
+    device_from_json,
+    read_any,
+    scan_all,
 )
 
 try:
@@ -56,11 +52,8 @@ SHORTCUT_PATH = os.path.join(
 )
 
 DEFAULT_CONFIG = {
-    # 先轮询 2.4G 组，全部没命中再轮询蓝牙组；两组都为空时启动会自动发现
-    "devices": {
-        "2.4g": [],
-        "bluetooth": [],
-    },
+    # 按列表顺序轮询；2.4G 设备建议排在蓝牙前面
+    "devices": [],
     "threshold": 20,
     "interval_minutes": 5,
     "icon_style": "both",
@@ -85,59 +78,17 @@ _battery_solo_font = ImageFont.truetype(ICON_FONT_PATH, 76)
 _mouse_font = ImageFont.truetype(ICON_FONT_PATH, 22)
 
 
-def _normalize_devices(stored: dict) -> dict:
-    raw = stored.get("devices")
-    groups: dict[str, list] = {"2.4g": [], "bluetooth": []}
-
-    if isinstance(raw, dict):
-        for key in groups:
-            if isinstance(raw.get(key), list):
-                groups[key] = raw[key]
-    elif isinstance(raw, list):
-        # 上一版是带 connection 的单列表
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            connection = str(item.get("connection") or "").strip().lower()
-            if connection not in groups:
-                if str(item.get("unit_id") or "").strip():
-                    connection = "2.4g"
-                elif str(item.get("address") or "").strip():
-                    connection = "bluetooth"
-                else:
-                    # 两种稳定标识都没有，无法判断连接方式，跳过
-                    continue
-            groups[connection].append(item)
-    else:
-        # 更早的扁平结构
-        legacy_name = str(stored.get("device_name") or "").strip()
-        legacy_address = str(stored.get("device_address") or "").strip()
-        if legacy_name or legacy_address:
-            groups["bluetooth"].append({
-                "name": legacy_name,
-                "display_name": "",
-                "address": legacy_address,
-                "unit_id": "",
-            })
-
-    normalized = {}
-    for key, items in groups.items():
-        cleaned = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            entry = {
-                "name": str(item.get("name") or "").strip(),
-                "display_name": str(
-                    item.get("display_name") or item.get("alias") or ""
-                ).strip(),
-                "address": str(item.get("address") or "").strip().upper(),
-                "unit_id": str(item.get("unit_id") or "").strip().upper(),
-            }
-            if entry["name"] or entry["address"] or entry["unit_id"]:
-                cleaned.append(entry)
-        normalized[key] = cleaned
-    return normalized
+def _build_devices(config: dict) -> list[MouseDevice]:
+    devices: list[MouseDevice] = []
+    for item in config.get("devices") or []:
+        try:
+            device = device_from_json(item)
+        except (ValueError, KeyError):
+            continue
+        if not (device.name or device.stable_id):
+            continue
+        devices.append(device)
+    return devices
 
 
 def load_config() -> dict:
@@ -151,12 +102,8 @@ def load_config() -> dict:
 
     config = dict(DEFAULT_CONFIG)
     config.update(stored)
-    config["devices"] = _normalize_devices(stored)
-    for legacy in ("device_name", "device_address", "alias"):
-        config.pop(legacy, None)
-
-    if config != stored:
-        save_config(config)
+    if not isinstance(config["devices"], list):
+        config["devices"] = []
     return config
 
 
@@ -277,6 +224,7 @@ def remove_autostart_shortcut() -> bool:
 class Monitor:
     def __init__(self) -> None:
         self.config = load_config()
+        self.devices = _build_devices(self.config)
         self._config_mtime = _config_mtime()
         self.level: int | None = None
         self.source = ""
@@ -284,8 +232,8 @@ class Monitor:
         self.device_name = ""
         self.updated: datetime | None = None
         self.alerted = False
-        self.active: tuple[str, dict] | None = None
-        self.discovered: list[dict] = []
+        self.active: MouseDevice | None = None
+        self.discovered: list[Candidate] = []
         self.scanning = False
         self.icon: pystray.Icon | None = None
         self._stop = threading.Event()
@@ -318,28 +266,26 @@ class Monitor:
     def _refresh(self) -> None:
         self._reload_config_if_changed()
 
-        if not self._has_devices():
+        if not self.devices:
             self.active = None
             self._apply(BatteryReading(None, "", "", "未绑定设备"))
             return
 
         # 已经锁定设备时只查它；读不到就认为掉线，重新找一遍
         if self.active is not None:
-            key, device = self.active
-            reading = READERS[key](device)
+            reading = self.active.read()
             if reading.ok:
                 self._apply(reading)
                 self._notify_if_needed(reading)
                 return
             self.active = None
 
-        self.active, reading = find_device(self.config["devices"])
+        self.active, reading = read_any(self.devices)
         self._apply(reading)
         self._notify_if_needed(reading)
 
     def _has_devices(self) -> bool:
-        devices = self.config["devices"]
-        return bool(devices.get("2.4g") or devices.get("bluetooth"))
+        return bool(self.devices)
 
     def _reload_config_if_changed(self) -> None:
         """配置文件被手动改过时重新加载，无需重启程序。"""
@@ -348,6 +294,7 @@ class Monitor:
             return
         self._config_mtime = mtime
         self.config = load_config()
+        self.devices = _build_devices(self.config)
         self._config_mtime = _config_mtime()
         # 设备条目可能被改过，之前的锁定作废，按新配置重新找
         self.active = None
@@ -500,40 +447,23 @@ class Monitor:
                 self._row_label(row), self._make_bind(row)
             )
 
-    def _unbound_rows(self) -> list[dict]:
+    def _unbound_rows(self) -> list[Candidate]:
         """过滤掉已经写进配置的设备。"""
-        bound: set[tuple[str, str]] = set()
-        for group in self.config["devices"].values():
-            for device in group:
-                if device.get("address"):
-                    bound.add(("bluetooth", device["address"]))
-                if device.get("unit_id"):
-                    bound.add(("2.4g", device["unit_id"]))
+        bound = {device.uid for device in self.devices}
+        return [row for row in self.discovered if row.device.uid not in bound]
 
-        rows = []
-        for row in self.discovered:
-            if row["connection"] == "bluetooth":
-                marker = ("bluetooth", (row.get("address") or "").upper())
-            else:
-                marker = ("2.4g", (row.get("unit_id") or "").upper())
-            if marker in bound:
-                continue
-            rows.append(row)
-        return rows
-
-    def _row_label(self, row: dict) -> str:
-        name = row.get("name") or "未知设备"
+    def _row_label(self, row: Candidate) -> str:
+        device = row.device
+        name = device.name or "未知设备"
         for prefix in ("Wireless Mobile Mouse ", "Logitech "):
             if name.startswith(prefix):
                 name = name[len(prefix):]
         if len(name) > 34:
             name = name[:33] + "…"
-        channel = "2.4G" if row["connection"] == "2.4g" else "蓝牙"
-        level = row.get("level")
-        suffix = f" · {level}%" if level is not None else ""
-        return f"{name} · {channel}{suffix}"
+        suffix = f" · {row.level}%" if row.level is not None else ""
+        return f"{name} · {device.channel_label}{suffix}"
 
-    def _make_bind(self, row: dict):
+    def _make_bind(self, row: Candidate):
         def action(icon: pystray.Icon, item: pystray.MenuItem) -> None:
             threading.Thread(target=self._bind, args=(row,), daemon=True).start()
 
@@ -554,7 +484,7 @@ class Monitor:
 
     def _scan_worker(self, notify: bool) -> None:
         try:
-            rows = candidates()
+            rows = scan_all(only_bindable=True)
         except Exception:
             rows = []
         self.discovered = rows
@@ -571,49 +501,22 @@ class Monitor:
                     "没有发现可用设备，请确认鼠标已开机并连接。", "未发现设备"
                 )
 
-    def _bind(self, row: dict) -> None:
-        key = row["connection"]
-        entry = {
-            "name": row.get("name") or "",
-            "display_name": "",
-            "address": (row.get("address") or "").upper() if key == "bluetooth" else "",
-            "unit_id": (row.get("unit_id") or "").upper() if key == "2.4g" else "",
-        }
-        marker = entry["address"] or entry["unit_id"]
-        if not marker and not entry["name"]:
+    def _bind(self, row: Candidate) -> None:
+        device = row.device
+        if not (device.stable_id or device.name):
             return
 
-        group = self.config["devices"][key]
-        exists = False
-        for existing in group:
-            if entry["address"] and existing.get("address") == entry["address"]:
-                exists = True
-                break
-            if entry["unit_id"] and existing.get("unit_id") == entry["unit_id"]:
-                exists = True
-                break
-            if not marker and entry["name"] and existing.get("name") == entry["name"]:
-                exists = True
-                break
-        if not exists:
-            group.append(entry)
+        if not any(existing.uid == device.uid for existing in self.devices):
+            self.config["devices"].append(device.to_json())
             save_config(self.config)
 
         # 保存后重新加载，用规范化后的条目锁定设备，避免与配置文件不一致
         self.config = load_config()
         self._config_mtime = _config_mtime()
-        active = None
-        for stored in self.config["devices"][key]:
-            if entry["address"] and stored.get("address") == entry["address"]:
-                active = stored
-                break
-            if entry["unit_id"] and stored.get("unit_id") == entry["unit_id"]:
-                active = stored
-                break
-            if not marker and entry["name"] and stored.get("name") == entry["name"]:
-                active = stored
-                break
-        self.active = (key, active or entry)
+        self.devices = _build_devices(self.config)
+        self.active = next(
+            (item for item in self.devices if item.uid == device.uid), None
+        )
         self._refresh()
         if self.icon is not None:
             self.icon.update_menu()
@@ -651,18 +554,24 @@ class Monitor:
 
 def main() -> None:
     if "--scan" in sys.argv:
-        for row in scan():
-            if row["connection"] == "bluetooth":
-                state = f'电量 {row["level"]}%' if row["online"] else "已断开"
-                print(f'蓝牙  地址={row["address"] or "-"}  名称={row["name"]}  {state}')
+        for row in scan_all():
+            device = row.device
+            if device.type == "bluetooth":
+                if not row.online:
+                    state = "已断开"
+                elif row.level is None:
+                    state = "未上报电量"
+                else:
+                    state = f"电量 {row.level}%"
+                print(f"蓝牙  地址={device.stable_id or '-'}  名称={device.name}  {state}")
             else:
-                print(f'2.4G  单元ID={row["unit_id"] or "-"}  名称={row["name"]}  '
-                      f'电量 {row["level"]}%')
+                print(f"{device.channel_label}  单元ID={device.stable_id or '-'}  "
+                      f"名称={device.name}  电量 {row.level}%")
         return
 
     monitor = Monitor()
     if "--once" in sys.argv:
-        print(read_battery(monitor.config["devices"]))
+        print(read_any(monitor.devices)[1])
         return
     monitor.run()
 
