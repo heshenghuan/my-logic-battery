@@ -587,7 +587,7 @@ def main() -> None:
                     state = "未上报电量"
                 else:
                     state = f"电量 {row.level}%"
-                print(f"蓝牙  地址={device.stable_id or '-'}  名称={device.name}  {state}")
+                print(f"蓝牙  单元ID={device.stable_id or '-'}  名称={device.name}  {state}")
             else:
                 print(f"{device.channel_label}  单元ID={device.stable_id or '-'}  "
                       f"名称={device.name}  电量 {row.level}%")

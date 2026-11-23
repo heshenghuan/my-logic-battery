@@ -98,7 +98,7 @@ python -m venv .venv
       "type": "bluetooth",
       "name": "MX Anywhere 2",
       "display_name": "",
-      "address": "AABBCCDDEEFF"
+      "unit_id": "AABBCCDDEEFF"
     }
   ]
 }
@@ -113,10 +113,9 @@ python -m venv .venv
 | `type` | 设备类：`logitech_2.4g`、`mloong_2.4g` 或 `bluetooth` |
 | `name` | 原始型号名，用于显示和兜底匹配 |
 | `display_name` | 托盘上显示的名字，留空则显示 `name` |
-| `address` | 蓝牙 BLE 地址，大写十六进制，`bluetooth` 条目的稳定标识 |
-| `unit_id` | 2.4G 接收器的稳定标识：罗技为 HID++ unitId，Mloong 为接收器序列号，由设备固件决定、不随名称变化 |
+| `unit_id` | 稳定标识，所有类型统一用这一字段：罗技 2.4G 为 HID++ unitId，Mloong 2.4G 为接收器序列号，蓝牙为 BLE 地址（大写十六进制）。由设备固件决定、不随名称变化 |
 
-`type` 与稳定标识共同构成设备 uid（如 `mloong_2.4g:D1K_...`），uid 不写进配置；`address` / `unit_id` 留空时退回按 `name` 匹配。手动修改 `config.json` 后不需要重启：下一次轮询，或点菜单「立即刷新」，就会重新加载。
+`type` 与 `unit_id` 共同构成设备 uid（如 `mloong_2.4g:D1K_...`），uid 不写进配置；`unit_id` 留空时退回按 `name` 匹配。手动修改 `config.json` 后不需要重启：下一次轮询，或点菜单「立即刷新」，就会重新加载。
 
 `--scan` 可以直接打印出这些值：
 
@@ -125,7 +124,7 @@ python -m venv .venv
 ```
 
 ```
-蓝牙  地址=AABBCCDDEEFF  名称=MX Anywhere 2  已断开
+蓝牙  单元ID=AABBCCDDEEFF  名称=MX Anywhere 2  已断开
 2.4G  单元ID=DEADBEEF  名称=Wireless Mobile Mouse MX Anywhere 2S  电量 50%
 2.4G  单元ID=D1K_XXXXXXXXXXXX_A72V1  名称=MX301 PRO_2.4G  电量 90%
 ```
@@ -205,7 +204,7 @@ Windows 下 hidapi 写入前要补一个 `0x00` report ID，读回的数据不�
 - 首次启动会自动扫描并列出可用设备，但不会自动绑定，必须从菜单里选择后才会写入 `config.json`
 - 2.4G 上同一接收器里的罗技键盘也会出现在候选列表里，绑定前请确认型号
 - Mloong 协议目前只按 MX301 PRO V2 的设备包实现并实测 2.4G 通道；同 VID/PID 的 MX301 V2（非 PRO）未验证，应答中的充电标志也暂未显示
-- `address` / `unit_id` 为空时才退回按 `name` 匹配；名称匹配按整名优先、单词边界包含，`MX Anywhere 2` 不会误匹配 `MX Anywhere 2S`
+- `unit_id` 为空时才退回按 `name` 匹配；名称匹配按整名优先、单词边界包含，`MX Anywhere 2` 不会误匹配 `MX Anywhere 2S`
 - 2.4G 通道要求鼠标已切到接收器；切走后蓝牙侧可能仍报缓存值
 - 依赖系统字体 `C:\Windows\Fonts\segmdl2.ttf`（Win10/11 自带）
 - MDL2 只有 9 格电池字形，90% 与 100% 的图标相同；`E85A` 起是带插头的充电图标，故未使用

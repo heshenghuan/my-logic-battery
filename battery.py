@@ -47,7 +47,6 @@ class MouseDevice:
 
     type = ""
     channel_label = ""
-    stable_field = "unit_id"
 
     def __init__(self, name: str, display_name: str = "",
                  stable_id: str = "") -> None:
@@ -73,7 +72,7 @@ class MouseDevice:
             "type": self.type,
             "name": self.name,
             "display_name": self.display_name,
-            self.stable_field: self.stable_id,
+            "unit_id": self.stable_id,
         }
 
     @classmethod
@@ -83,7 +82,7 @@ class MouseDevice:
         return cls(
             str(data.get("name") or ""),
             str(data.get("display_name") or data.get("alias") or ""),
-            str(data.get(cls.stable_field) or ""),
+            str(data.get("unit_id") or ""),
         )
 
     @classmethod
