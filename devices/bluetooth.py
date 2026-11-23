@@ -22,11 +22,6 @@ class BluetoothMouseDevice(MouseDevice):
 
     type = "bluetooth"
     channel_label = "蓝牙"
-    stable_field = "address"
-
-    @property
-    def address(self) -> str:
-        return self.stable_id
 
     def read(self) -> BatteryReading:
         try:
@@ -39,8 +34,8 @@ class BluetoothMouseDevice(MouseDevice):
                         continue
 
                     name = friendly_name(devices.handle, info)
-                    match_address = bool(self.address) and self.address in dev_instance.upper()
-                    match_name = (not self.address) and bool(name) \
+                    match_address = bool(self.stable_id) and self.stable_id in dev_instance.upper()
+                    match_name = (not self.stable_id) and bool(name) \
                         and _name_score(self.name, name) > 0
                     if not (match_address or match_name):
                         continue
